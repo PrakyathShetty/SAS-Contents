@@ -1,0 +1,311 @@
+%macro sdtme_std_blfl_v02;
+
+   %*** Standard Error Processing Section for business rule ***;
+
+   %put ************************************************************************;
+   %put %str(      Processing &sysmacroname );
+   %put ************************************************************************;
+   %global esdtm_rc ;
+
+   %if &esdtm_rc ne 0 %then %do;
+      %put %str(WA)RNING: A prior %str(er)ror has occurred or environment is not correctly initialised;
+      %put %str(WA)RNING: The macro &sysmacroname will not execute;
+      %goto xx_exit;
+   %end;
+
+   %*** Exit if Raw dataset is empty ***;
+   %if %esdtm_noexec(sdtmrawt.&esdtm_domain) %then %goto xx_exit;
+
+   %if ^%sysfunc(fileexist(%sysfunc(pathname(std_util))/modelspec/ext_template/template_blfl.xlsx)) %then %do;
+      %put MESS: %sysfunc(pathname(std_util))/modelspec/ext_template/template_blfl.xlsx does not exist, not further processing.;
+      %goto xx_exit;
+   %end;
+
+   %esdtm_studyid;
+
+   %local _blflspec _blflvar _blflcon _blflparam _blflvalue _blflsublist _blflexclude;
+
+   %*** Get baseline flag specification ***;
+   %if ^%sysfunc(exist(blfl_spec)) %then %do;
+      libname blflspec xlsx "%sysfunc(pathname(std_util))/modelspec/ext_template/template_blfl.xlsx";
+
+      data blfl_spec;
+         set blflspec.blfl_spec;
+         order=_n_;
+      run;
+
+      libname blflspec clear;
+   %end;
+
+   proc sql noprint;
+      %*** Look up format name in sdtmmap.cdw_ct_cd_list where cd_list_submval is equal to the CT defined for DTHFL ***;
+      %let fmtname =;
+      select distinct fmtname into :fmtname trimmed
+      from sdtmmap.cdw_ct_cd_list
+      where upcase(cd_list_submval) =
+         (select xmlcodelist from cstsdmda.reference_columns
+            where upcase(column)= "%upcase(&esdtm_var.)BLFL"
+              and upcase(table) = "%upcase(&esdtm_domain.)"
+              and cd_list_id = "YESNO");  
+
+      %*** lookup topic_cds for the current domain and identify BASELINE visit ***;
+      create table __domain_topiccd as 
+      select dom_cd.topic_cd, 
+             flow.vis_id as visitnum
+      from gcmd.topic_cd_to_sdtm_domain as dom_cd,
+           adm.plnd_flowch_item_coll as flow
+      where upcase(dom_cd.sdtm_domain)="%upcase(&esdtm_domain)"
+            and dom_cd.NN_SDTM_VER="&SDTM_VERSION"
+            and upcase(flow.assm_type) in ('BASELINE' 'BASELINE 2')
+            and dom_cd.topic_cd=flow.topic_cd;
+
+      %*** Get baseline flag variables ***;
+      select trim(b.class_column),
+             trim(r.column),
+             cats(r.column,"='",lowcase(r.column),"='||quote(trim(",b.class_column,'))')
+         into :_blflspec separated by ' ', 
+              :_blflvar separated by ' ',
+              :_blflcon separated by '; '
+      from blfl_spec as b 
+         inner join cstsdmda.reference_columns as r
+            on r.class_column=b.class_column
+      where lowcase(r.table) eq "&esdtm_domain"
+      order by b.order;
+      %let _first=%scan(&_blflvar,&sqlobs,%str( ));
+   quit;
+
+   %*** Process trial specific baseline definition file                                    ***;
+   %*** If exists, copy excel file to ../dm/data/external_data subfolder. Remove otherwise ***;
+   %let _blflsrc=%sysfunc(pathname(ext))/%lowcase(&esdtm_studyid)_blfl.xlsx;
+
+   %if ^%sysfunc(prxmatch(/er\d|cdw_user/,%lowcase(&sysuserid))) %then %do;
+      %if %sysfunc(fileexist(&instance_path/share/data/external_data/%lowcase(&esdtm_studyid)_blfl.xlsx)) %then %do;
+         %sysexec /usr/bin/rsync -a "&instance_path/share/data/external_data/%lowcase(&esdtm_studyid)_blfl.xlsx" "%sysfunc(pathname(ext))";
+      %end;
+      %else %if %sysfunc(fileexist(&_blflsrc)) %then %do;
+         %sysexec /usr/bin/rm "&_blflsrc";
+      %end;
+   %end;
+
+   %*** Parse baseline flag parameters / values, if any ***;
+   %if %sysfunc(fileexist(&_blflsrc)) %then %do;
+      libname _blfl xlsx "&_blflsrc";
+
+      %if %sysfunc(exist(_blfl.blfl_parameter)) %then %do;
+         filename _blflcon temp;
+         data __&esdtm_domain._blfl;
+            length &_blflvar $300 blfl_subset blfl_condition $2000;
+            file _blflcon;
+            set _blfl.blfl_parameter;
+            where (lowcase(table) eq "&esdtm_domain" and __testcd and (blfl_parameter or blfl_value)) or (not table and blfl_orres_exlude);
+
+            &_blflcon;
+
+            if ^missing(table) then do;
+               if ^missing(blfl_parameter) then do;
+                  call symput('_blflparam','Y');
+                  blfl_n=cats('__blfl',_n_);
+                  blfl_subset='if '||catx(' and ',%sysfunc(tranwrd(&_blflvar,%str( ),%str(,))))||' then output '||cats(blfl_n,';');           
+               end;           
+               else do;
+                  call symput('_blflvalue','Y');
+                  blfl_condition='if '||catx(' and ',%sysfunc(tranwrd(&_blflvar,%str( ),%str(,))))||' then do; if '||
+                                 trim(blfl_value)||" then &esdtm_var.blfl=put('Y',$&fmtname..); else call missing(&esdtm_var.blfl,_blfl); end;";
+                  put blfl_condition; 
+               end;
+            end;
+            else if ^missing(blfl_orres_exlude) then call symput('_blflexclude',trim(blfl_orres_exlude));
+
+            keep table &_blflvar blfl_:;
+         run;
+      %end;
+
+      libname _blfl clear;
+   %end;
+
+   %if &_blflparam eq Y %then %do;
+      filename _blflsub temp;
+      data null_;
+         file _blflsub;
+         set __&esdtm_domain._blfl end=last;
+         where blfl_parameter;
+         if _n_ = 1 then do;
+            __b=blfl_n;
+            retain __b;
+         end;
+         else __b=catx(' ',__b,blfl_n);
+
+         if _n_ ne 1 then blfl_subset='else '||blfl_subset;
+         put blfl_subset;
+
+         call symput(trim(blfl_n),trim(blfl_parameter));
+         if ^missing(blfl_value) then call symput(cats(blfl_n,'v'),cats(blfl_value));
+         if last then call symput('_blflsublist',__b);
+      run;
+   %end;
+
+   %*** Derive _blfldtcn based on RFXSTDTC or RFSTDTC in case of missing RFXSTDTC ***;
+   %if ^%sysfunc(exist(_blfldtcn)) %then %do;
+      data _blfldtcn;
+         set sdtmt.dm (keep=usubjid rfxstdtc rfstdtc rfpendtc actarmcd);
+         where rfxstdtc or rfstdtc or actarmcd eq 'NOTTRT';
+         %*** Use RFPENDTC for NOTTRT subjects ***;
+         if actarmcd eq 'NOTTRT' then do;
+            if substr(rfpendtc,11,1) eq 'T' and not find(substr(rfpendtc,12),'--') then _blfldtcn=input(rfpendtc,?? e8601dt16.);
+            else _blfldtcn=input(cats(rfpendtc,'T23:59'), ?? e8601dt16.);            
+         end;
+         else do;
+            if substr(coalescec(rfxstdtc,rfstdtc),11,1) eq 'T' and not find(substr(coalescec(rfxstdtc,rfstdtc),12),'--') then 
+               _blfldtcn=input(coalescec(rfxstdtc,rfstdtc),?? e8601dt16.);
+            else _blfldtcn=input(cats(coalescec(rfxstdtc,rfstdtc),'T23:59'), ?? e8601dt16.);
+         end;
+         format _blfldtcn e8601dt16.;
+         keep usubjid _blfldtcn;
+      run;
+   %end;
+
+   %*** Assign --BLFL to assessment done on or before _blfldtcn as follow: ***;
+   %*** Priority 1: according to the specified BLFL parameter and/or value ***;
+   %*** Priority 2: first cdms_sub_evnt_num on defined baseline visit      ***;
+   %*** Priority 3: last assessment on or before _blfldtcn                 ***;
+   data __&esdtm_domain._f_blfl
+        __blfl_vis
+        __blfl_dtc
+        &_blflsublist;
+      if _n_=0 then set sdtmt.&esdtm_domain(keep=&esdtm_var.blfl);
+      length _dtcn _blfldtcn vis_id 8 _blfl $1;
+      if _n_ = 1 then do;
+         declare hash h1(dataset: '_blfldtcn');
+         h1.definekey('usubjid');
+         h1.definedata('_blfldtcn');
+         h1.definedone();
+
+         declare hash h2a(dataset: '__domain_topiccd');
+         h2a.definekey('topic_cd');
+         h2a.definedone();
+
+         declare hash h2(dataset: '__domain_topiccd',multidata :'Y');
+         h2.definekey('topic_cd','visitnum');
+         h2.definedone();
+        
+         call missing(_blfldtcn);
+      end;
+      set sdtmrawt.&esdtm_domain;
+      where &esdtm_var.orres not in (' ' &_blflexclude) and &esdtm_var.dtc and not find(substr(&esdtm_var.dtc,1,10),'--');
+
+      %*** Identify assessment done on or before _blfldtcn ***;
+      if substr(&esdtm_var.dtc,11,1) eq 'T' and not find(&esdtm_var.dtc,'--') then _dtcn=input(&esdtm_var.dtc,?? e8601dt16.);
+      else _dtcn=input(cats(&esdtm_var.dtc,'T00:00'), ?? e8601dt16.);
+      if h1.find()=0 and _dtcn le _blfldtcn then _blfl='?';
+
+      %*** Identify planned assessment, i.e. defined in flowchart ***;
+      if h2a.find()=0 then do;
+         if h2.find()=0 then _vis=0;
+         else _vis=1;
+      end;
+
+      if _blfl='?' then do;
+         %*** Process Priority 1: according to the specified BLFL value ***;
+         %if &_blflvalue eq Y %then %do;
+            %include _blflcon;
+         %end;
+
+         if ^missing(&esdtm_var.blfl) then output __&esdtm_domain._f_blfl;
+         else if _blfl='?' then do;
+            %*** Identify assessment specified in trial specific definition ***;
+            %if &_blflparam eq Y %then %do;
+               %include _blflsub;
+               else
+            %end;
+            if ^missing(_vis) then output __blfl_vis;
+            else output __blfl_dtc;
+         end;
+      end;
+
+      format _dtcn _blfldtcn e8601dt16.;
+   run;
+
+   %*** Process Priority 2: first cdms_sub_evnt_num on defined baseline visit ***;
+   proc sort data=__blfl_vis;
+      by usubjid &esdtm_subj &_blflvar _vis visitnum cdms_sub_evt_num;
+   run;
+
+   data __&esdtm_domain._f_blfl_vis;
+      set __blfl_vis;
+      by usubjid &esdtm_subj &_blflvar _vis visitnum cdms_sub_evt_num;
+      if first.&_first then &esdtm_var.blfl=put('Y',$&fmtname..);
+      else call missing(&esdtm_var.blfl);
+   run;
+
+   %*** Process Priority 3: last assessment on or before _blfldtcn ***;
+   proc sort data=__blfl_dtc;
+      by usubjid &esdtm_subj &_blflvar descending _dtcn;
+   run;
+
+   data __&esdtm_domain._f_blfl_dtc;
+      set __blfl_dtc;
+      by usubjid &esdtm_subj &_blflvar descending _dtcn;
+      if first.&_first then &esdtm_var.blfl=put('Y',$&fmtname..);
+      else call missing(&esdtm_var.blfl);
+   run;
+
+   %*** Handling assessment specified in trial specific definition ***;
+   %if &_blflparam eq Y %then %do;
+      %do _i=1 %to %sysfunc(count(&_blflsublist,%str( )))+1 %by 1;
+         %let _j&_i=%scan(&&__blfl&_i,%sysfunc(count(&&__blfl&_i,%str( )))+1,%str( ));
+         proc sort data=__blfl&_i out=__blfl&_i._vis;
+            where _vis;
+            by usubjid &esdtm_subj &_blflvar &&__blfl&_i _vis visitnum cdms_sub_evt_num;
+         run;
+
+         data __&esdtm_domain._f_blfl&_i._vis;
+            set __blfl&_i._vis;
+            by usubjid &esdtm_subj &_blflvar &&__blfl&_i _vis visitnum cdms_sub_evt_num;
+            
+            %if %symexist(__blfl&_i.v) %then %do;
+               if &&__blfl&_i.v  
+            %end;
+            %else %do;
+               if first.&&_j&_i 
+            %end;
+               then &esdtm_var.blfl=put('Y',$&fmtname..);
+            else call missing(&esdtm_var.blfl);
+         run;
+
+         proc sort data=__blfl&_i out=__blfl&_i._dtc;
+            where not _vis;
+            by usubjid &esdtm_subj &_blflvar &&__blfl&_i descending _dtcn;
+         run;
+
+         data __&esdtm_domain._f_blfl&_i._dtc;
+            set __blfl&_i._dtc;
+            by usubjid &esdtm_subj &_blflvar &&__blfl&_i descending _dtcn;
+            
+            %if %symexist(__blfl&_i.v) %then %do;
+               if &&__blfl&_i.v  
+            %end;
+            %else %do;
+               if first.&&_j&_i 
+            %end;
+               then &esdtm_var.blfl=put('Y',$&fmtname..);
+            else call missing(&esdtm_var.blfl);
+         run;
+      %end;
+   %end;
+
+   data &esdtm_domain._blfl;
+      set __&esdtm_domain._f_:;
+      where &esdtm_var.blfl;
+   run;
+
+   %*** Call standard vargroup macro ***;
+   %sdtme_domain_vargroup_v01( data = &esdtm_domain._blfl , variables = &esdtm_var.blfl, Keys= &esdtm_var.spid );
+
+   %*** -- business rule exit point -- ***;
+   %xx_exit:
+
+   %sdtme_cleartemp_v01();
+
+   %put ************** End of macro: &sysmacroname  **************;
+
+%mend sdtme_std_blfl_v02;
