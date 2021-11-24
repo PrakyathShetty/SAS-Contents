@@ -1,0 +1,16 @@
+/* To split the cahracters based on length */
+
+%let NUM_OF_STR=5;
+%let CHR_PER_STR=40;
+data _null_;
+array V {*} $ &CHR_PER_STR V1-V&NUM_OF_STR;
+S='the demonetisation exercise has been called a watershed for a country saddled with counterfeiters pushing';
+_I=1; _J=1;
+do until (scan(S,_I,' ') eq '');
+   _W=scan(S,_I,' ');
+   if lengthn(V[_J])+lengthn(_W) > lengthc(V[_J]) then _J+1;
+   V[_J]=strip(V[_J])!!' '!!_W;
+   _I+1;
+end;
+run;
+
