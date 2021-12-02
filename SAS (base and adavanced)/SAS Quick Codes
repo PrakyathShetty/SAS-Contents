@@ -1,4 +1,4 @@
-/* To split the cahracters based on length */
+/* To split the characters based on length */
 
 %let NUM_OF_STR=5;
 %let CHR_PER_STR=40;
