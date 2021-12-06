@@ -14,3 +14,13 @@ do until (scan(S,_I,' ') eq '');
 end;
 run;
 
+/* selecting variables */
+_numeric_ : all numeric variables
+_character_ : all character variables
+_all_  : all variables
+prefix1 - prefix# : all variables with the same prefix assuming they're numbered
+prefix:  : all variables that start with prefix
+firstVar -- lastVar : variables based on location between first and last variable, including the first and last. 
+first-numeric-lastVar : variables that are numeric based on location between first and last variable
+
+
