@@ -1,0 +1,18 @@
+/*Converting RGB (Red, Green, Blue) to Hexadecimal
+Many programs like Microsoft Excel or Microsoft Word use an RGB scale to show color values. However, SAS 9.3 only uses hexadecimal values instead of RGB to represent colors. 
+SAS support has made code available that allows you to change your red, green, and blue color values and see the corresponding hexadecimal value in the log. 
+Here is the code provided by SAS support: */
+data_null_;
+/* Input values */
+red=42;
+green=31;
+blue=170;
+/* Convert to hex */
+hexred=put(red,hex2.);
+hexgreen=put(green,hex2.);
+hexblue=put(blue,hex2.);
+/* Create as a SAS RGB color */
+sasrgb="CX"||hexred||hexgreen||hexblue;
+/* Write the new value to the Log */
+Put sasrgb;
+run;
